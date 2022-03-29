@@ -99,8 +99,8 @@ func TestWithMiddleware(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.NotNil(t, conf.EventsAPI.Middleware)
+	require.NotNil(t, conf.EventsAPI.HTTPConfig.Middleware)
 
-	conf.EventsAPI.Middleware(nil)
+	conf.EventsAPI.HTTPConfig.Middleware(nil)
 	assert.True(t, ok)
 }

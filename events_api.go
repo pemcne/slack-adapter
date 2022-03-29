@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-joe/joe"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
 	"go.uber.org/zap"
 )
 
@@ -20,28 +22,36 @@ import (
 // See https://api.slack.com/events-api
 type EventsAPIServer struct {
 	*BotAdapter
-	http *http.Server
-	conf EventsAPIConfig
-	opts []slackevents.Option
+	http         *http.Server
+	socketClient *socketmode.Client
+	conf         EventsAPIConfig
+	opts         []slackevents.Option
 }
 
 // EventsAPIAdapter returns a new EventsAPIServer as joe.Module.
 // If you want to use the slack RTM API instead (i.e. using web sockets), you
 // should use the slack.Adapter(…) function instead.
-func EventsAPIAdapter(listenAddr, token, verificationToken string, opts ...Option) joe.Module {
+func EventsAPIAdapter(token string, opts ...Option) joe.Module {
 	return joe.ModuleFunc(func(joeConf *joe.Config) error {
 		conf, err := newConf(token, joeConf, opts)
 		if err != nil {
 			return err
 		}
-		conf.VerificationToken = verificationToken
-
-		a, err := NewEventsAPIServer(joeConf.Context, listenAddr, conf)
-		if err != nil {
-			return err
+		if conf.EventsAPI.HTTPConfig.ListenAddr != "" {
+			a, err := NewEventsAPIServer(joeConf.Context, conf)
+			if err != nil {
+				return err
+			}
+			joeConf.SetAdapter(a)
+		} else if conf.EventsAPI.SocketConfig.AppToken != "" {
+			a, err := NewEventsAPISocket(joeConf.Context, conf)
+			if err != nil {
+				return err
+			}
+			joeConf.SetAdapter(a)
+		} else {
+			return joe.Error("WithHTTPServer or WithSocketMode is required")
 		}
-
-		joeConf.SetAdapter(a)
 		return nil
 	})
 }
@@ -49,7 +59,7 @@ func EventsAPIAdapter(listenAddr, token, verificationToken string, opts ...Optio
 // NewEventsAPIServer creates a new *EventsAPIServer that connects to Slack
 // using the events API. Note that you will usually configure this type of slack
 // adapter as joe.Module (i.e. using the EventsAPIAdapter function of this package).
-func NewEventsAPIServer(ctx context.Context, listenAddr string, conf Config) (*EventsAPIServer, error) {
+func NewEventsAPIServer(ctx context.Context, conf Config) (*EventsAPIServer, error) {
 	events := make(chan slackEvent)
 	client := slack.New(conf.Token, conf.slackOptions()...)
 	adapter, err := newAdapter(ctx, client, nil, events, conf)
@@ -61,26 +71,67 @@ func NewEventsAPIServer(ctx context.Context, listenAddr string, conf Config) (*E
 		BotAdapter: adapter,
 		conf:       conf.EventsAPI,
 	}
-
+	// Default back to HTTP server
+	httpConfig := conf.EventsAPI.HTTPConfig
 	a.opts = append(a.opts, slackevents.OptionVerifyToken(
 		&slackevents.TokenComparator{
-			VerificationToken: conf.VerificationToken,
+			VerificationToken: httpConfig.VerificationToken,
 		},
 	))
 
 	var handler http.Handler = http.HandlerFunc(a.httpHandler)
-	if conf.EventsAPI.Middleware != nil {
-		handler = conf.EventsAPI.Middleware(handler)
+	if httpConfig.Middleware != nil {
+		handler = httpConfig.Middleware(handler)
 	}
 
 	a.http = &http.Server{
-		Addr:         listenAddr,
+		Addr:         httpConfig.ListenAddr,
 		Handler:      handler,
 		ErrorLog:     zap.NewStdLog(conf.Logger),
-		TLSConfig:    conf.EventsAPI.TLSConf,
-		ReadTimeout:  conf.EventsAPI.ReadTimeout,
-		WriteTimeout: conf.EventsAPI.WriteTimeout,
+		TLSConfig:    httpConfig.TLSConf,
+		ReadTimeout:  httpConfig.ReadTimeout,
+		WriteTimeout: httpConfig.WriteTimeout,
 	}
+
+	return a, nil
+}
+
+func NewEventsAPISocket(ctx context.Context, conf Config) (*EventsAPIServer, error) {
+	events := make(chan slackEvent)
+	slackOpts := conf.slackOptions()
+	slackOpts = append(slackOpts, slack.OptionAppLevelToken(conf.EventsAPI.SocketConfig.AppToken), slack.OptionDebug(true))
+	api := slack.New(conf.Token, slackOpts...)
+	client := socketmode.New(api, socketmode.OptionDebug(conf.Debug))
+
+	adapter, err := newAdapter(ctx, client, nil, events, conf)
+	if err != nil {
+		return nil, err
+	}
+
+	a := &EventsAPIServer{
+		BotAdapter: adapter,
+		conf:       conf.EventsAPI,
+	}
+
+	a.socketClient = client
+
+	go func() {
+		for evt := range client.Events {
+			if evt.Type == socketmode.EventTypeEventsAPI {
+				conf.Logger.Info("Got an event from socket")
+				apiEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
+				if !ok {
+					conf.Logger.Info("Ignoring event")
+					continue
+				}
+				client.Ack(*evt.Request)
+				if apiEvent.Type == slackevents.CallbackEvent {
+					conf.Logger.Info("Got a callback event")
+					a.handleEvent(apiEvent.InnerEvent)
+				}
+			}
+		}
+	}()
 
 	return a, nil
 }
@@ -89,16 +140,20 @@ func NewEventsAPIServer(ctx context.Context, listenAddr string, conf Config) (*E
 // events to the given brain.
 func (a *EventsAPIServer) RegisterAt(brain *joe.Brain) {
 	// Start the HTTP server. The goroutine will stop when the adapter is closed.
-	go a.startHTTPServer()
+	if a.conf.HTTPConfig.ListenAddr != "" {
+		go a.startHTTPServer()
+	} else if a.conf.SocketConfig.AppToken != "" {
+		go a.socketClient.RunContext(a.context)
+	}
 	a.BotAdapter.RegisterAt(brain)
 }
 
 func (a *EventsAPIServer) startHTTPServer() {
 	var err error
-	if a.conf.CertFile == "" {
+	if a.conf.HTTPConfig.CertFile == "" {
 		err = a.http.ListenAndServe()
 	} else {
-		err = a.http.ListenAndServeTLS(a.conf.CertFile, a.conf.KeyFile)
+		err = a.http.ListenAndServeTLS(a.conf.HTTPConfig.CertFile, a.conf.HTTPConfig.KeyFile)
 	}
 
 	if err != nil && err != http.ErrServerClosed {
@@ -178,6 +233,13 @@ func (a *EventsAPIServer) handleEvent(innerEvent slackevents.EventsAPIInnerEvent
 }
 
 func (a *EventsAPIServer) handleMessageEvent(ev *slackevents.MessageEvent) {
+	// Socket api gives you a message event and app mention event for each
+	// mention so filter out an app mention here since it will be taken care
+	// of by the next event
+	selflink := a.userLink(a.userID)
+	if strings.Contains(ev.Text, selflink) {
+		return
+	}
 	var edited *slack.Edited
 	if ev.Edited != nil {
 		edited = &slack.Edited{
@@ -255,17 +317,20 @@ func (a *EventsAPIServer) handleReactionAddedEvent(ev *slackevents.ReactionAdded
 // Close shuts down the disconnects the adapter from the slack API.
 func (a *EventsAPIServer) Close() error {
 	ctx := context.Background()
-	if a.conf.ShutdownTimeout > 0 {
-		var cancel func()
-		ctx, cancel = context.WithTimeout(ctx, a.conf.ShutdownTimeout)
-		defer cancel()
-	}
+	if a.conf.HTTPConfig.ListenAddr != "" {
+		if a.conf.HTTPConfig.ShutdownTimeout > 0 {
+			var cancel func()
+			ctx, cancel = context.WithTimeout(ctx, a.conf.HTTPConfig.ShutdownTimeout)
+			defer cancel()
+		}
 
-	err := a.http.Shutdown(ctx)
+		err := a.http.Shutdown(ctx)
+		return err
+	}
 
 	// After we are sure we do not get any new events from the HTTP server, we
 	// must stop event processing loop by closing the channel.
 	close(a.events)
 
-	return err
+	return nil
 }

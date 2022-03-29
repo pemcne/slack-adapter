@@ -44,8 +44,9 @@ func newTestEventsAPIServer(t *testing.T, optionalConf ...Config) (_ *EventsAPIS
 	}))
 	t.Cleanup(slackAPI.Close)
 	conf.SlackAPIURL = slackAPI.URL
+	conf.EventsAPI.HTTPConfig.ListenAddr = "127.0.0.1:0"
 
-	s, err := NewEventsAPIServer(ctx, "127.0.0.1:0", conf)
+	s, err := NewEventsAPIServer(ctx, conf)
 	require.NoError(t, err)
 
 	brain := joetest.NewBrain(t)
@@ -178,7 +179,9 @@ func TestEventsAPIServer_HTTPHandlerMiddleware(t *testing.T) {
 	s, _ := newTestEventsAPIServer(t, Config{
 		Logger: zap.New(obs),
 		EventsAPI: EventsAPIConfig{
-			Middleware: middleware,
+			HTTPConfig: EventsHTTPConfig{
+				Middleware: middleware,
+			},
 		},
 	})
 

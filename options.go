@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -16,7 +17,6 @@ type Option func(*Config) error
 // Config contains the configuration of a BotAdapter.
 type Config struct {
 	Token             string
-	VerificationToken string
 	Name              string
 	Debug             bool
 	Logger            *zap.Logger
@@ -37,14 +37,25 @@ type Config struct {
 	EventsAPI EventsAPIConfig
 }
 
-// EventsAPIConfig contains the configuration of an EventsAPIServer.
-type EventsAPIConfig struct {
+type EventsHTTPConfig struct {
+	ListenAddr        string
+	VerificationToken string
 	Middleware        func(next http.Handler) http.Handler
 	ShutdownTimeout   time.Duration
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
 	TLSConf           *tls.Config
 	CertFile, KeyFile string
+}
+
+type EventsSocketConfig struct {
+	AppToken string
+}
+
+// EventsAPIConfig contains the configuration of an EventsAPIServer.
+type EventsAPIConfig struct {
+	HTTPConfig   EventsHTTPConfig
+	SocketConfig EventsSocketConfig
 }
 
 func (conf Config) slackOptions() []slack.Option {
@@ -115,6 +126,33 @@ func WithListenPassive() Option {
 	}
 }
 
+// WithSocketMode is an option for the EventsAPIServer that enables Socket
+// mode
+func WithSocketMode(appToken string) Option {
+	return func(conf *Config) error {
+		if !strings.Contains(appToken, "xapp-") {
+			return errors.New("appToken must contain 'xapp-'")
+		}
+
+		conf.EventsAPI.SocketConfig = EventsSocketConfig{
+			AppToken: appToken,
+		}
+		return nil
+	}
+}
+
+// WithHTTPServer is an option for the EventsAPIServer that enables
+// the HTTP server
+func WithHTTPServer(listenAddr, verificationToken string) Option {
+	return func(conf *Config) error {
+		conf.EventsAPI.HTTPConfig = EventsHTTPConfig{
+			ListenAddr:        listenAddr,
+			VerificationToken: verificationToken,
+		}
+		return nil
+	}
+}
+
 // WithTLS is an option for the EventsAPIServer that enables serving HTTP
 // requests via TLS.
 func WithTLS(certFile, keyFile string) Option {
@@ -126,8 +164,8 @@ func WithTLS(certFile, keyFile string) Option {
 			return errors.New("path to private key file cannot be empty")
 		}
 
-		conf.EventsAPI.CertFile = certFile
-		conf.EventsAPI.KeyFile = keyFile
+		conf.EventsAPI.HTTPConfig.CertFile = certFile
+		conf.EventsAPI.HTTPConfig.KeyFile = keyFile
 
 		return nil
 	}
@@ -137,7 +175,7 @@ func WithTLS(certFile, keyFile string) Option {
 // combination with the WithTLS(…) option to configure the HTTPS server.
 func WithTLSConfig(tlsConf *tls.Config) Option {
 	return func(conf *Config) error {
-		conf.EventsAPI.TLSConf = tlsConf
+		conf.EventsAPI.HTTPConfig.TLSConf = tlsConf
 		return nil
 	}
 }
@@ -146,8 +184,8 @@ func WithTLSConfig(tlsConf *tls.Config) Option {
 // and write timeout of the HTTP server to the same given value.
 func WithTimeouts(d time.Duration) Option {
 	return func(conf *Config) error {
-		conf.EventsAPI.ReadTimeout = d
-		conf.EventsAPI.WriteTimeout = d
+		conf.EventsAPI.HTTPConfig.ReadTimeout = d
+		conf.EventsAPI.HTTPConfig.WriteTimeout = d
 		return nil
 	}
 }
@@ -156,7 +194,7 @@ func WithTimeouts(d time.Duration) Option {
 // maximum duration for reading the entire HTTP request, including the body.
 func WithReadTimeout(d time.Duration) Option {
 	return func(conf *Config) error {
-		conf.EventsAPI.ReadTimeout = d
+		conf.EventsAPI.HTTPConfig.ReadTimeout = d
 		return nil
 	}
 }
@@ -165,7 +203,7 @@ func WithReadTimeout(d time.Duration) Option {
 // servers maximum duration before timing out writes of the HTTP response.
 func WithWriteTimeout(d time.Duration) Option {
 	return func(conf *Config) error {
-		conf.EventsAPI.WriteTimeout = d
+		conf.EventsAPI.HTTPConfig.WriteTimeout = d
 		return nil
 	}
 }
@@ -174,7 +212,7 @@ func WithWriteTimeout(d time.Duration) Option {
 // inject an HTTP middleware to the HTTP server.
 func WithMiddleware(mw func(next http.Handler) http.Handler) Option {
 	return func(conf *Config) error {
-		conf.EventsAPI.Middleware = mw
+		conf.EventsAPI.HTTPConfig.Middleware = mw
 		return nil
 	}
 }
