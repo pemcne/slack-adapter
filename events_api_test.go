@@ -72,7 +72,7 @@ func TestEventsAPIServer_HandleMessageEvent(t *testing.T) {
 	req := httptest.NewRequest("POST", "/foo", toJSON(slackevents.EventsAPICallbackEvent{
 		Type: slackevents.CallbackEvent,
 		InnerEvent: rawJSON(slackevents.MessageEvent{
-			Type:            slackevents.Message,
+			Type:            string(slackevents.Message),
 			Channel:         "D023BB3L2",
 			User:            "U1234",
 			Username:        "fgrosse",
@@ -105,7 +105,7 @@ func TestEventsAPIServer_HandleAppMentionEvent(t *testing.T) {
 	req := httptest.NewRequest("POST", "/foo", toJSON(slackevents.EventsAPICallbackEvent{
 		Type: slackevents.CallbackEvent,
 		InnerEvent: rawJSON(slackevents.AppMentionEvent{
-			Type:            slackevents.AppMention,
+			Type:            string(slackevents.AppMention),
 			Channel:         "D023BB3L2",
 			User:            "U1234",
 			Text:            "Hey @joe!",
@@ -137,7 +137,7 @@ func TestEventsAPIServer_HandleReactionAddedEvent(t *testing.T) {
 	req := httptest.NewRequest("POST", "/foo", toJSON(slackevents.EventsAPICallbackEvent{
 		Type: slackevents.CallbackEvent,
 		InnerEvent: rawJSON(slackevents.ReactionAddedEvent{
-			Type:     slackevents.ReactionAdded,
+			Type:     string(slackevents.ReactionAdded),
 			User:     "U1234",
 			Reaction: "+1",
 			Item: slackevents.Item{
