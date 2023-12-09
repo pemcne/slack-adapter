@@ -198,7 +198,7 @@ func (a *BotAdapter) handleSlackEvents(brain *joe.Brain) {
 
 		case *slack.UserTypingEvent:
 			brain.Emit(joe.UserTypingEvent{
-				User:    a.userByID(ev.User),
+				User:    a.UserByID(ev.User),
 				Channel: ev.Channel,
 			})
 
@@ -265,7 +265,7 @@ func (a *BotAdapter) handleReactionAddedEvent(ev *slack.ReactionAddedEvent, brai
 	})
 }
 
-func (a *BotAdapter) userByID(userID string) joe.User {
+func (a *BotAdapter) UserByID(userID string) joe.User {
 	a.usersMu.RLock()
 	user, ok := a.users[userID]
 	a.usersMu.RUnlock()
